@@ -318,7 +318,7 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  char *mem;
+  //char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -327,20 +327,32 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
+    
+    *pte = (~ PTE_W) & *pte;
+
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
+    /*
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
+    */
+    if(mappages(d, (void*)i, PGSIZE, pa, flags) < 0) {
+      //kfree(mem);
       goto bad;
     }
+
+    incr_refc(pa);
+   
   }
+  
+  lcr3(V2P(pgdir));
+
   return d;
 
 bad:
   freevm(d);
+  lcr3(V2P(pgdir));
   return 0;
 }
 
@@ -392,3 +404,87 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 //PAGEBREAK!
 // Blank page.
 
+void 
+CoW_handler(void){
+  
+    int fa = rcr2();	//fault address
+    pte_t *pte = walkpgdir(myproc()->pgdir, (void*)fa, 0);
+
+    if(!(*pte) || pte == 0 || !PTE_U || !PTE_P || fa >= KERNBASE){ 
+        myproc()->killed = 1;
+        return;
+    }
+
+    int pa = PTE_ADDR(*pte);          
+    int ref = get_refc(pa);
+    if(ref == 1){
+        *pte = *pte | PTE_W;
+        lcr3(V2P(myproc()->pgdir));
+        return;
+    }
+    else if(ref > 1){
+        char* mem = kalloc();
+        if(mem == 0){
+            myproc()->killed = 1;
+            return;
+        }
+        memmove(mem, (char*)P2V(pa), PGSIZE);
+   
+        *pte = V2P(mem) | PTE_P | PTE_W | PTE_U; 
+        decr_refc(pa);
+        lcr3(V2P(myproc()->pgdir));
+        return;
+    }
+    else panic("error");
+    
+    lcr3(V2P(myproc()->pgdir));
+}
+
+int
+countvp(void){
+
+    struct proc *p = myproc(); 
+    int size = p->sz;
+    pde_t *pgdir = p->pgdir;
+    int cnt = 0;
+
+    for(int va = 0; va < size; va += PGSIZE){
+        pte_t *pte = walkpgdir(pgdir, (void *)va, 0);
+        if(pte && (*pte & PTE_P)) 
+            cnt++;
+    }
+    return cnt;
+
+}
+
+int
+countpp(void){
+
+    struct proc *p = myproc(); 
+    int size = p->sz;
+    pde_t *pgdir = p->pgdir;
+    int cnt = 0;
+    pte_t *pte;
+    char *end = (char *)PGROUNDDOWN(size -1);
+
+    for(char *a = 0; a <= (char *)end; a += PGSIZE){
+        if((pte = walkpgdir(pgdir, (char *)a, 0)) != 0 && (*pte & PTE_P)) 
+            cnt++;
+    }
+    return cnt;
+}
+
+
+int
+countptp(void) {
+ 
+    struct proc *p = myproc(); 
+    pde_t *pgdir = p->pgdir;
+    int cnt = 1; 
+
+    for(int i = 0; i < NPDENTRIES; i++){	//mmu.h
+        if(pgdir[i] & PTE_P)
+            cnt++;
+    }
+    return cnt;
+}

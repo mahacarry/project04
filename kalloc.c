@@ -21,6 +21,10 @@ struct {
   struct spinlock lock;
   int use_lock;
   struct run *freelist;
+  
+  int refer[PHYSTOP / PGSIZE];
+  int freepage;  
+
 } kmem;
 
 // Initialization happens in two phases.
@@ -48,8 +52,13 @@ freerange(void *vstart, void *vend)
 {
   char *p;
   p = (char*)PGROUNDUP((uint)vstart);
-  for(; p + PGSIZE <= (char*)vend; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)vend; p += PGSIZE){
+
+    kmem.refer[V2P(p)/PGSIZE] = 0;
+
     kfree(p);
+
+  }
 }
 //PAGEBREAK: 21
 // Free the page of physical memory pointed at by v,
@@ -65,13 +74,27 @@ kfree(char *v)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
-  memset(v, 1, PGSIZE);
+  //memset(v, 1, PGSIZE);
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = (struct run*)v;
+  
+  if(kmem.refer[V2P(v)/PGSIZE] > 0) 
+    kmem.refer[V2P(v)/PGSIZE] = kmem.refer[V2P(v)/PGSIZE] - 1;
+  /*
   r->next = kmem.freelist;
   kmem.freelist = r;
+  */
+
+  if(kmem.refer[V2P(v)/PGSIZE] == 0){   
+    
+    memset(v, 1, PGSIZE); 
+    r->next = kmem.freelist;
+    kmem.freepage = kmem.freepage + 1;
+    kmem.freelist = r;
+  }
+
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -87,10 +110,67 @@ kalloc(void)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+
+    kmem.refer[V2P((char*)r) / PGSIZE] = 1;
+    kmem.freepage--;
+  
+  }
+
   if(kmem.use_lock)
     release(&kmem.lock);
+
   return (char*)r;
 }
 
+void 
+incr_refc(uint pa)
+{
+  acquire(&kmem.lock);
+  
+  int index = pa / PGSIZE;
+  kmem.refer[index]++;
+
+  release(&kmem.lock);
+
+}
+
+void 
+decr_refc(uint pa)
+{
+  acquire(&kmem.lock);
+  
+  int index = pa / PGSIZE;
+  kmem.refer[index]--;
+  
+  release(&kmem.lock);
+}
+
+int 
+get_refc(uint pa)
+{
+  int tmp;
+
+  acquire(&kmem.lock);
+
+  int index = pa / PGSIZE;
+  tmp = kmem.refer[index];
+  
+  release(&kmem.lock);
+
+  return tmp;
+
+}
+
+int 
+countfp(void)
+{
+  acquire(&kmem.lock);
+
+  uint tmp = kmem.freepage;
+  
+  release(&kmem.lock);
+ 
+  return tmp;
+} 
